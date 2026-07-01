@@ -16,6 +16,8 @@ aplicação permite criar, editar, pausar e remover matérias, assuntos e cards.
 - agendamento por [`ts-fsrs`](https://github.com/open-spaced-repetition/ts-fsrs),
   sem algoritmo aproximado;
 - CRUD completo de matérias, assuntos e cards;
+- gerador gratuito com 24 questões editoriais adicionais de AFO, filtros por
+  assunto, formato e dificuldade;
 - histórico, precisão, cards maduros e visão dos últimos sete dias;
 - persistência local imediata e backup JSON;
 - sincronização opcional com Firebase Authentication + Firestore;
@@ -53,10 +55,14 @@ npm test
 npm run build
 ```
 
-## Firebase opcional
+## Armazenamento local e Firebase opcional
 
-Sem Firebase, o app continua totalmente utilizável e mantém os dados no
-navegador. Para sincronizar entre dispositivos:
+Sem Firebase, o app continua totalmente utilizável e mantém os dados somente
+no armazenamento do navegador atual. Nesse modo não existe conta nem
+sincronização: limpar os dados do site ou trocar de navegador/dispositivo exige
+restaurar um backup JSON.
+
+Para sincronizar automaticamente entre dispositivos:
 
 1. crie um projeto no
    [Firebase Console](https://console.firebase.google.com/);
@@ -98,4 +104,3 @@ src/
 ## Licença
 
 MIT.
-

@@ -1401,6 +1401,13 @@ kbd {
   flex: 0 0 auto;
 }
 
+.page-heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+}
+
 .structure-grid {
   display: grid;
   grid-template-columns: 1fr 1fr 0.9fr;
@@ -1883,6 +1890,81 @@ kbd {
 .setup-note svg {
   flex: 0 0 auto;
   color: #6e8e44;
+}
+
+.generator-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 16px;
+  color: #eaf2ed;
+  background:
+    radial-gradient(circle at 90% 10%, rgba(217, 255, 103, 0.14), transparent 34%),
+    var(--navy);
+  border-radius: 13px;
+}
+
+.generator-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--navy);
+  background: var(--brand);
+  border-radius: 12px;
+}
+
+.generator-intro strong {
+  font-size: 12px;
+}
+
+.generator-intro p {
+  margin: 5px 0 0;
+  color: #a9bbb5;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.generator-availability {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 14px 15px;
+  background: #f4f9e9;
+  border: 1px solid #deebc6;
+  border-radius: 11px;
+}
+
+.generator-availability.empty {
+  background: #f5f7f4;
+  border-color: #e2e7e0;
+}
+
+.generator-availability > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.generator-availability strong {
+  color: #4f7428;
+  font-size: 24px;
+}
+
+.generator-availability span {
+  color: #53635e;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.generator-availability small {
+  max-width: 220px;
+  color: #7c8884;
+  font-size: 9px;
+  line-height: 1.45;
+  text-align: right;
 }
 
 .confirm-modal {
@@ -2496,6 +2578,17 @@ kbd {
     width: 100%;
   }
 
+  .page-heading-actions {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .page-heading-actions .primary-button,
+  .page-heading-actions .secondary-button {
+    width: 100%;
+  }
+
   .bank-heading {
     align-items: stretch;
     flex-direction: column;
@@ -2549,6 +2642,16 @@ kbd {
   .form-grid.three,
   .answer-grid {
     grid-template-columns: 1fr;
+  }
+
+  .generator-availability {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .generator-availability small {
+    max-width: none;
+    text-align: left;
   }
 
   .modal-backdrop {

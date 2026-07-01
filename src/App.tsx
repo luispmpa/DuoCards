@@ -41,6 +41,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  countAvailableEditorialQuestions,
+  generateEditorialQuestions,
+  type QuestionGenerationOptions,
+} from "./data/questionGenerator";
 import { createSeedData } from "./data/seed";
 import { formatLongDate, isoDate, isDue } from "./lib/date";
 import {
@@ -122,6 +127,10 @@ function calculateStreak(data: AppData) {
   return 1;
 }
 
+function streakLabel(days: number) {
+  return `${days} ${days === 1 ? "dia" : "dias"}`;
+}
+
 export default function App() {
   const [data, setData] = useState<AppData>(() => loadData());
   const [view, setView] = useState<View>("home");
@@ -133,8 +142,8 @@ export default function App() {
     connected: false,
     syncing: false,
     message: firebaseConfigured
-      ? "Pronto para conectar"
-      : "Modo local — Firebase opcional",
+      ? "Nuvem disponível — entrar"
+      : "Salvo neste navegador",
   });
   const cloudHydrated = useRef(false);
 
@@ -158,8 +167,8 @@ export default function App() {
           connected: false,
           syncing: false,
           message: firebaseConfigured
-            ? "Pronto para conectar"
-            : "Modo local — Firebase opcional",
+            ? "Nuvem disponível — entrar"
+            : "Salvo neste navegador",
           userEmail: undefined,
         }));
         return;
@@ -481,7 +490,7 @@ function HomeView({
             <Flame size={23} fill="currentColor" />
           </span>
           <div>
-            <strong>{data.profile.streak} dias</strong>
+            <strong>{streakLabel(data.profile.streak)}</strong>
             <span>sequência atual</span>
           </div>
         </div>
@@ -555,7 +564,7 @@ function HomeView({
           icon={Flame}
           tone="pink"
           label="Sequência"
-          value={`${data.profile.streak} dias`}
+          value={streakLabel(data.profile.streak)}
           detail="consistência é vantagem"
         />
       </section>
@@ -1034,6 +1043,7 @@ function ContentView({
   const [topicFilter, setTopicFilter] = useState("all");
   const [editor, setEditor] = useState<EditorState>(null);
   const [deleting, setDeleting] = useState<DeleteState>(null);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
 
   const filteredCards = data.cards.filter((card) => {
     const matchesTopic =
@@ -1116,6 +1126,23 @@ function ContentView({
     notify("Item removido.");
   }
 
+  function generateQuestions(options: QuestionGenerationOptions) {
+    const generated = generateEditorialQuestions(data, options);
+    if (!generated.length) {
+      notify("Não há questões inéditas com esses filtros.");
+      return;
+    }
+
+    setData((current) => ({
+      ...current,
+      cards: [...current.cards, ...generated],
+    }));
+    setGeneratorOpen(false);
+    notify(
+      `${generated.length} ${generated.length === 1 ? "questão adicionada" : "questões adicionadas"} à sua fila.`,
+    );
+  }
+
   return (
     <div className="page content-page">
       <section className="page-heading">
@@ -1124,12 +1151,20 @@ function ContentView({
           <h1>Organize seu conteúdo</h1>
           <p>Matérias, assuntos e questões em uma estrutura simples de manter.</p>
         </div>
-        <button
-          className="primary-button"
-          onClick={() => setEditor({ kind: "card" })}
-        >
-          <Plus size={18} /> Novo card
-        </button>
+        <div className="page-heading-actions">
+          <button
+            className="secondary-button"
+            onClick={() => setEditor({ kind: "card" })}
+          >
+            <Plus size={18} /> Novo card
+          </button>
+          <button
+            className="primary-button"
+            onClick={() => setGeneratorOpen(true)}
+          >
+            <Sparkles size={18} /> Gerar questões
+          </button>
+        </div>
       </section>
 
       <section className="structure-grid">
@@ -1387,6 +1422,20 @@ function ContentView({
             subjects={data.subjects}
             topics={data.topics}
             onSave={saveCard}
+          />
+        </Modal>
+      )}
+      {generatorOpen && (
+        <Modal
+          title="Gerar questões de AFO"
+          onClose={() => setGeneratorOpen(false)}
+        >
+          <QuestionGeneratorForm
+            data={data}
+            topics={data.topics.filter(
+              (topic) => topic.subjectId === "subject_afo",
+            )}
+            onGenerate={generateQuestions}
           />
         </Modal>
       )}
@@ -1754,6 +1803,164 @@ function CardForm({
   );
 }
 
+function QuestionGeneratorForm({
+  data,
+  topics,
+  onGenerate,
+}: {
+  data: AppData;
+  topics: Topic[];
+  onGenerate: (options: QuestionGenerationOptions) => void;
+}) {
+  const [options, setOptions] = useState<QuestionGenerationOptions>({
+    topicId: "all",
+    kind: "mixed",
+    difficulty: "all",
+    count: 5,
+  });
+  const available = countAvailableEditorialQuestions(data, options);
+  const effectiveCount = Math.min(options.count, available);
+
+  function updateOptions(
+    partial: Partial<QuestionGenerationOptions>,
+  ) {
+    setOptions((current) => ({ ...current, ...partial }));
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!effectiveCount) return;
+    onGenerate({ ...options, count: effectiveCount });
+  }
+
+  return (
+    <form className="editor-form generator-form" onSubmit={submit}>
+      <div className="generator-intro">
+        <div className="generator-mark">
+          <Sparkles size={24} />
+        </div>
+        <div>
+          <strong>Banco editorial verificado</strong>
+          <p>
+            Questões comentadas com fonte normativa, prontas para entrar no
+            FSRS. Funciona sem IA, chave de API ou cobrança.
+          </p>
+        </div>
+      </div>
+
+      <div className="form-grid two">
+        <label>
+          <span>Assunto</span>
+          <select
+            value={options.topicId}
+            onChange={(event) =>
+              updateOptions({ topicId: event.target.value })
+            }
+          >
+            <option value="all">Todos os assuntos</option>
+            {topics.map((topic) => (
+              <option key={topic.id} value={topic.id}>
+                {topic.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Formato</span>
+          <select
+            value={options.kind}
+            onChange={(event) =>
+              updateOptions({
+                kind: event.target.value as QuestionGenerationOptions["kind"],
+              })
+            }
+          >
+            <option value="mixed">Misturar formatos</option>
+            <option value="multiple_choice">Múltipla escolha</option>
+            <option value="true_false">Certo ou errado</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="form-grid two">
+        <label>
+          <span>Dificuldade</span>
+          <select
+            value={options.difficulty}
+            onChange={(event) =>
+              updateOptions({
+                difficulty:
+                  event.target
+                    .value as QuestionGenerationOptions["difficulty"],
+              })
+            }
+          >
+            <option value="all">Todas</option>
+            <option value="Básico">Básico</option>
+            <option value="Intermediário">Intermediário</option>
+            <option value="Avançado">Avançado</option>
+          </select>
+        </label>
+        <label>
+          <span>Quantidade</span>
+          <select
+            value={Math.min(options.count, Math.max(1, available))}
+            onChange={(event) =>
+              updateOptions({ count: Number(event.target.value) })
+            }
+            disabled={!available}
+          >
+            {Array.from(
+              { length: Math.min(10, Math.max(1, available)) },
+              (_, index) => index + 1,
+            ).map((count) => (
+              <option key={count} value={count}>
+                {count} {count === 1 ? "questão" : "questões"}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className={`generator-availability ${available ? "" : "empty"}`}>
+        <div>
+          <strong>{available}</strong>
+          <span>
+            {available === 1
+              ? "questão inédita disponível"
+              : "questões inéditas disponíveis"}
+          </span>
+        </div>
+        <small>
+          O gerador nunca adiciona uma questão que já esteja na sua biblioteca.
+        </small>
+      </div>
+
+      <div className="editor-tip">
+        <ShieldCheck size={18} />
+        <span>
+          <strong>Qualidade primeiro:</strong> cada questão contém gabarito,
+          explicação e referência à Constituição, à Lei nº 4.320/1964, à LRF ou
+          ao MCASP.
+        </span>
+      </div>
+
+      <div className="form-actions">
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={!available}
+        >
+          <Sparkles size={17} />
+          {available
+            ? `Gerar ${effectiveCount} ${effectiveCount === 1 ? "questão" : "questões"}`
+            : "Banco esgotado para estes filtros"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 function ConfirmModal({
   title,
   text,
@@ -1868,7 +2075,7 @@ function ProgressView({ data }: { data: AppData }) {
           icon={Flame}
           tone="pink"
           label="Maior ativo"
-          value={`${data.profile.streak} dias`}
+          value={streakLabel(data.profile.streak)}
           detail="sequência atual"
         />
       </section>
@@ -2074,7 +2281,7 @@ function SettingsView({
                     ? cloudStatus.userEmail
                     : firebaseConfigured
                       ? "Nuvem disponível"
-                      : "Modo local ativo"}
+                      : "Dados neste navegador"}
                 </strong>
                 <span>{cloudStatus.message}</span>
               </div>
@@ -2097,7 +2304,7 @@ function SettingsView({
                 </button>
               )
             ) : (
-              <span className="local-badge">Sem custo · local</span>
+              <span className="local-badge">Somente neste dispositivo</span>
             )}
           </div>
 
@@ -2105,9 +2312,12 @@ function SettingsView({
             <div className="setup-note">
               <CircleHelp size={18} />
               <p>
-                O app já funciona integralmente no navegador. Para sincronizar
-                entre dispositivos, configure as variáveis <code>VITE_FIREBASE_*</code>{" "}
-                descritas no README e habilite o login Google.
+                Seus cards e seu progresso estão salvos apenas neste navegador.
+                Se os dados do site forem apagados ou você trocar de
+                dispositivo, use um backup para recuperá-los. Para sincronizar
+                automaticamente, configure as variáveis{" "}
+                <code>VITE_FIREBASE_*</code> descritas no README e habilite o
+                login Google.
               </p>
             </div>
           )}
