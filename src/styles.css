@@ -2137,6 +2137,7 @@ kbd {
 
 .generator-setup,
 .generator-error,
+.generator-progress,
 .review-warning {
   display: flex;
   align-items: flex-start;
@@ -2177,6 +2178,33 @@ kbd {
   line-height: 1.5;
   background: #fff0ee;
   border: 1px solid #f2d3cf;
+}
+
+.generator-progress {
+  color: #34562c;
+  background: #f4f9e9;
+  border: 1px solid #deebc6;
+}
+
+.generator-progress > svg {
+  flex: 0 0 auto;
+  color: #5e8a28;
+}
+
+.generator-progress > div {
+  display: grid;
+  gap: 3px;
+}
+
+.generator-progress strong {
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.generator-progress span {
+  color: #718068;
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .spin {

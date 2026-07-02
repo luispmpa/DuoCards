@@ -59,8 +59,19 @@ export type GeminiGenerationResult = {
   model: string;
 };
 
+export type GeminiGenerationProgress = {
+  batch: number;
+  totalBatches: number;
+  attempt: number;
+  model: string;
+  status: "generating" | "retrying" | "fallback";
+};
+
 export const geminiModel =
   import.meta.env.VITE_GEMINI_MODEL || "gemini-3.5-flash";
+
+export const geminiFallbackModel =
+  import.meta.env.VITE_GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
 
 export const geminiConfiguration = {
   firebase: firebaseConfigured,
@@ -325,6 +336,7 @@ export function validateGeminiPayload(
   data: AppData,
   topics: Topic[],
   options?: QuestionGenerationOptions,
+  modelName = geminiModel,
 ): GeminiGenerationResult {
   const questions = Array.isArray(payload?.questions) ? payload.questions : [];
   const validTopicIds = new Set(topics.map((topic) => topic.id));
@@ -336,7 +348,7 @@ export function validateGeminiPayload(
   return {
     cards: validDrafts.map(toStudyCard),
     rejected: questions.length - validDrafts.length,
-    model: geminiModel,
+    model: modelName,
   };
 }
 
@@ -376,17 +388,62 @@ function buildPrompt(
   ].join("\n");
 }
 
-export async function generateGeminiQuestions(
+export function getGeminiBatchSizes(count: number, maximumBatchSize = 2) {
+  const safeCount = Math.max(1, Math.min(5, Math.trunc(count)));
+  const safeBatchSize = Math.max(1, Math.trunc(maximumBatchSize));
+  const batches: number[] = [];
+  let remaining = safeCount;
+
+  while (remaining > 0) {
+    const batchSize = Math.min(remaining, safeBatchSize);
+    batches.push(batchSize);
+    remaining -= batchSize;
+  }
+
+  return batches;
+}
+
+function geminiErrorText(reason: unknown) {
+  if (reason instanceof Error) {
+    return `${reason.name} ${reason.message}`;
+  }
+  if (reason && typeof reason === "object") {
+    const record = reason as Record<string, unknown>;
+    return [record.code, record.status, record.message]
+      .filter((value) => typeof value === "string" || typeof value === "number")
+      .join(" ");
+  }
+  return String(reason ?? "");
+}
+
+export function isTransientGeminiError(reason: unknown) {
+  return /(?:\b429\b|\b500\b|\b502\b|\b503\b|\b504\b|high demand|overload|resource.?exhausted|temporar|unavailable|fetch-error|timeout|timed out|deadline)/i.test(
+    geminiErrorText(reason),
+  );
+}
+
+export function getFriendlyGeminiErrorMessage(reason: unknown) {
+  const details = geminiErrorText(reason);
+
+  if (isTransientGeminiError(reason)) {
+    return "O Gemini continua com alta demanda. Aguarde um instante e tente novamente; seu banco de questões não foi alterado.";
+  }
+  if (/(?:app.?check|permission|forbidden|\b401\b|\b403\b)/i.test(details)) {
+    return "A proteção do gerador recusou esta tentativa. Recarregue a página e tente novamente.";
+  }
+  return "Não foi possível concluir este lote. Tente novamente; nenhuma questão incompleta será adicionada ao banco.";
+}
+
+function wait(delay: number) {
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+async function generateGeminiBatch(
   data: AppData,
   topics: Topic[],
   options: QuestionGenerationOptions,
+  modelName: string,
 ): Promise<GeminiGenerationResult> {
-  if (!geminiConfiguration.ready) {
-    throw new Error(
-      "A geração com Gemini ainda precisa do Firebase e do App Check.",
-    );
-  }
-
   const app = await getFirebaseApp();
   const { getAI, getGenerativeModel, GoogleAIBackend, Schema, ThinkingLevel } =
     await import("firebase/ai");
@@ -488,14 +545,14 @@ export async function generateGeminiQuestions(
   const model = getGenerativeModel(
     ai,
     {
-      model: geminiModel,
+      model: modelName,
       systemInstruction:
         "Você é um editor sênior de questões de AFO para concursos públicos brasileiros. Produza somente múltipla escolha A-E. Priorize exatidão normativa, clareza, ausência de ambiguidade, distratores plausíveis e alto valor didático. Analise todas as alternativas. Nunca invente dispositivo legal, letra da lei, mnemônico consagrado, referência ou URL.",
       tools: [{ urlContext: {} }],
       generationConfig: {
         responseMimeType: "application/json",
         responseSchema,
-        maxOutputTokens: 32_000,
+        maxOutputTokens: Math.min(32_000, 12_000 + options.count * 8_000),
         temperature: 0.25,
         thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
       },
@@ -507,5 +564,110 @@ export async function generateGeminiQuestions(
     buildPrompt(data, topics, options),
   );
   const payload = JSON.parse(response.response.text()) as GeminiPayload;
-  return validateGeminiPayload(payload, data, selectedTopics, options);
+  return validateGeminiPayload(
+    payload,
+    data,
+    selectedTopics,
+    options,
+    modelName,
+  );
+}
+
+async function generateBatchWithRecovery(
+  data: AppData,
+  topics: Topic[],
+  options: QuestionGenerationOptions,
+  batch: number,
+  totalBatches: number,
+  onProgress?: (progress: GeminiGenerationProgress) => void,
+) {
+  const models = [...new Set([geminiModel, geminiFallbackModel])];
+  let lastError: unknown;
+
+  for (const [modelIndex, modelName] of models.entries()) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const status =
+        modelIndex > 0
+          ? attempt === 1
+            ? "fallback"
+            : "retrying"
+          : attempt === 1
+            ? "generating"
+            : "retrying";
+
+      onProgress?.({
+        batch,
+        totalBatches,
+        attempt,
+        model: modelName,
+        status,
+      });
+
+      if (attempt > 1) {
+        await wait(modelIndex > 0 ? 5_000 : 3_000);
+      }
+
+      try {
+        return await generateGeminiBatch(data, topics, options, modelName);
+      } catch (reason) {
+        lastError = reason;
+        if (!isTransientGeminiError(reason)) {
+          throw new Error(getFriendlyGeminiErrorMessage(reason));
+        }
+      }
+    }
+  }
+
+  throw new Error(getFriendlyGeminiErrorMessage(lastError));
+}
+
+export async function generateGeminiQuestions(
+  data: AppData,
+  topics: Topic[],
+  options: QuestionGenerationOptions,
+  onProgress?: (progress: GeminiGenerationProgress) => void,
+): Promise<GeminiGenerationResult> {
+  if (!geminiConfiguration.ready) {
+    throw new Error(
+      "A geração com Gemini ainda precisa do Firebase e do App Check.",
+    );
+  }
+
+  const selectedTopics =
+    options.topicId === "all"
+      ? topics
+      : topics.filter((topic) => topic.id === options.topicId);
+  if (!selectedTopics.length) {
+    throw new Error("Selecione um assunto válido para gerar as questões.");
+  }
+
+  const batchSizes = getGeminiBatchSizes(options.count);
+  const cards: StudyCard[] = [];
+  const models = new Set<string>();
+  let rejected = 0;
+  let workingData = data;
+
+  for (const [batchIndex, count] of batchSizes.entries()) {
+    const result = await generateBatchWithRecovery(
+      workingData,
+      selectedTopics,
+      { ...options, count },
+      batchIndex + 1,
+      batchSizes.length,
+      onProgress,
+    );
+    cards.push(...result.cards);
+    rejected += result.rejected;
+    models.add(result.model);
+    workingData = {
+      ...workingData,
+      cards: [...workingData.cards, ...result.cards],
+    };
+  }
+
+  return {
+    cards,
+    rejected,
+    model: [...models].join(" + "),
+  };
 }

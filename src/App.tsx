@@ -57,6 +57,7 @@ import {
 import {
   geminiConfiguration,
   generateGeminiQuestions,
+  type GeminiGenerationProgress,
   type GeminiGenerationResult,
 } from "./lib/gemini";
 import {
@@ -1187,11 +1188,19 @@ function ContentView({
     notify("Item removido.");
   }
 
-  async function generateWithGemini(options: QuestionGenerationOptions) {
+  async function generateWithGemini(
+    options: QuestionGenerationOptions,
+    onProgress?: (progress: GeminiGenerationProgress) => void,
+  ) {
     const topics = data.topics.filter(
       (topic) => topic.subjectId === "subject_afo",
     );
-    const result = await generateGeminiQuestions(data, topics, options);
+    const result = await generateGeminiQuestions(
+      data,
+      topics,
+      options,
+      onProgress,
+    );
     if (!result.cards.length) {
       throw new Error(
         "O Gemini respondeu, mas nenhuma questão passou pela validação. Tente novamente.",
@@ -1984,7 +1993,10 @@ function QuestionGeneratorForm({
   onGenerateGemini,
 }: {
   topics: Topic[];
-  onGenerateGemini: (options: QuestionGenerationOptions) => Promise<void>;
+  onGenerateGemini: (
+    options: QuestionGenerationOptions,
+    onProgress?: (progress: GeminiGenerationProgress) => void,
+  ) => Promise<void>;
 }) {
   const [options, setOptions] = useState<QuestionGenerationOptions>({
     topicId: "all",
@@ -1993,6 +2005,7 @@ function QuestionGeneratorForm({
     count: 3,
   });
   const [generating, setGenerating] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState("");
   const [error, setError] = useState("");
 
   function updateOptions(
@@ -2006,8 +2019,31 @@ function QuestionGeneratorForm({
     if (!options.count || !geminiConfiguration.ready || generating) return;
     setError("");
     setGenerating(true);
+    setGenerationProgress(
+      options.count > 2
+        ? "Preparando lotes menores para manter a qualidade..."
+        : "Preparando a geração...",
+    );
     try {
-      await onGenerateGemini(options);
+      await onGenerateGemini(options, (progress) => {
+        const batchLabel =
+          progress.totalBatches > 1
+            ? `Lote ${progress.batch} de ${progress.totalBatches}. `
+            : "";
+        if (progress.status === "fallback") {
+          setGenerationProgress(
+            `${batchLabel}O modelo principal está ocupado; continuando pela rota alternativa.`,
+          );
+        } else if (progress.status === "retrying") {
+          setGenerationProgress(
+            `${batchLabel}Alta demanda detectada; nova tentativa automática em instantes.`,
+          );
+        } else {
+          setGenerationProgress(
+            `${batchLabel}Consultando fontes oficiais e redigindo as explicações.`,
+          );
+        }
+      });
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -2016,6 +2052,7 @@ function QuestionGeneratorForm({
       );
     } finally {
       setGenerating(false);
+      setGenerationProgress("");
     }
   }
 
@@ -2106,8 +2143,8 @@ function QuestionGeneratorForm({
           <span>padrão obrigatório</span>
         </div>
         <small>
-          Até 5 por lote para preservar a profundidade. Não existe limite total
-          do banco.
+          Até 5 por geração. Pedidos maiores são divididos automaticamente para
+          preservar a profundidade.
         </small>
       </div>
 
@@ -2119,6 +2156,19 @@ function QuestionGeneratorForm({
           de memorização.
         </span>
       </div>
+
+      {generating && (
+        <div className="generator-progress" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={18} />
+          <div>
+            <strong>{generationProgress}</strong>
+            <span>
+              Lotes com até duas questões reduzem falhas sem limitar o total
+              solicitado.
+            </span>
+          </div>
+        </div>
+      )}
 
       {error && <div className="generator-error">{error}</div>}
 
@@ -2134,7 +2184,7 @@ function QuestionGeneratorForm({
             <Sparkles size={17} />
           )}
           {generating
-            ? "Consultando fontes e redigindo..."
+            ? "Gerando com recuperação automática..."
             : geminiConfiguration.ready
               ? `Gerar ${options.count} ${options.count === 1 ? "questão" : "questões"}`
               : "Gemini ainda não ativado"}

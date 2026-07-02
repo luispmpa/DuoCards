@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createSeedData } from "../data/seed";
 import {
+  getFriendlyGeminiErrorMessage,
+  getGeminiBatchSizes,
+  isTransientGeminiError,
   validateGeminiPayload,
   type GeminiPayload,
   type GeminiQuestionDraft,
@@ -127,5 +130,24 @@ describe("Gemini question validation", () => {
 
     expect(result.cards).toHaveLength(0);
     expect(result.rejected).toBe(1);
+  });
+});
+
+describe("Gemini generation recovery", () => {
+  it("splits larger requests into small batches without reducing the total", () => {
+    expect(getGeminiBatchSizes(1)).toEqual([1]);
+    expect(getGeminiBatchSizes(3)).toEqual([2, 1]);
+    expect(getGeminiBatchSizes(5)).toEqual([2, 2, 1]);
+  });
+
+  it("recognizes overload errors and never exposes their technical details", () => {
+    const error = new Error(
+      "AI: Error fetching from internal endpoint: [500] high demand",
+    );
+
+    expect(isTransientGeminiError(error)).toBe(true);
+    expect(getFriendlyGeminiErrorMessage(error)).toContain("alta demanda");
+    expect(getFriendlyGeminiErrorMessage(error)).not.toContain("endpoint");
+    expect(getFriendlyGeminiErrorMessage(error)).not.toContain("500");
   });
 });
