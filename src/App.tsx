@@ -12,6 +12,7 @@ import {
   CloudOff,
   Download,
   Edit3,
+  ExternalLink,
   Flame,
   Gauge,
   GraduationCap,
@@ -19,6 +20,7 @@ import {
   Layers3,
   Library,
   ListFilter,
+  LoaderCircle,
   LogOut,
   Menu,
   MoreHorizontal,
@@ -41,21 +43,22 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  countAvailableEditorialQuestions,
-  generateEditorialQuestions,
-  type QuestionGenerationOptions,
-} from "./data/questionGenerator";
+import type { QuestionGenerationOptions } from "./data/questionGenerator";
 import { createSeedData } from "./data/seed";
 import { formatLongDate, isoDate, isDue } from "./lib/date";
 import {
   connectWithGoogle,
   disconnectFirebase,
-  firebaseConfigured,
+  firebaseCloudSyncConfigured,
   loadCloudData,
   saveCloudData,
   watchFirebaseUser,
 } from "./lib/firebase";
+import {
+  geminiConfiguration,
+  generateGeminiQuestions,
+  type GeminiGenerationResult,
+} from "./lib/gemini";
 import {
   intervalLabel,
   newFsrsCard,
@@ -71,12 +74,12 @@ import {
   clearData,
   downloadBackup,
   loadData,
+  migrateData,
   parseBackup,
   saveData,
 } from "./lib/storage";
 import type {
   AppData,
-  CardKind,
   Difficulty,
   FirebaseStatus,
   StudyCard,
@@ -138,10 +141,10 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [cloudUid, setCloudUid] = useState<string | null>(null);
   const [cloudStatus, setCloudStatus] = useState<FirebaseStatus>({
-    configured: firebaseConfigured,
+    configured: firebaseCloudSyncConfigured,
     connected: false,
     syncing: false,
-    message: firebaseConfigured
+    message: firebaseCloudSyncConfigured
       ? "Nuvem disponível — entrar"
       : "Salvo neste navegador",
   });
@@ -166,7 +169,7 @@ export default function App() {
           ...current,
           connected: false,
           syncing: false,
-          message: firebaseConfigured
+          message: firebaseCloudSyncConfigured
             ? "Nuvem disponível — entrar"
             : "Salvo neste navegador",
           userEmail: undefined,
@@ -184,7 +187,7 @@ export default function App() {
 
       try {
         const remote = await loadCloudData(user.uid);
-        if (remote) setData(remote);
+        if (remote) setData(migrateData(remote));
         else await saveCloudData(user.uid, data);
         cloudHydrated.current = true;
         setCloudUid(user.uid);
@@ -959,15 +962,71 @@ function StudyView({
               <p>{card.explanation}</p>
               {selected &&
                 !correct &&
+                !card.alternativeExplanations &&
                 card.distractorNotes[selected] && (
                   <div className="distractor-note">
                     <strong>Por que sua opção não serve?</strong>
                     {card.distractorNotes[selected]}
                   </div>
                 )}
+              {card.alternativeExplanations && (
+                <div className="answer-analysis">
+                  <strong>Análise das alternativas</strong>
+                  <div>
+                    {card.alternatives.map((alternative) => (
+                      <article
+                        className={
+                          alternative.id === card.correctAnswer
+                            ? "correct"
+                            : alternative.id === selected
+                              ? "selected"
+                              : ""
+                        }
+                        key={alternative.id}
+                      >
+                        <span>{alternative.id}</span>
+                        <p>
+                          {card.alternativeExplanations?.[alternative.id]}
+                        </p>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {card.memoryAid && (
+                <div className="memory-aid">
+                  <Brain size={18} />
+                  <div>
+                    <span>{card.memoryAid.type}</span>
+                    <strong>{card.memoryAid.title}</strong>
+                    <p>{card.memoryAid.content}</p>
+                  </div>
+                </div>
+              )}
+              {card.legalBasis?.length ? (
+                <div className="legal-basis">
+                  <strong>Letra da lei</strong>
+                  {card.legalBasis.map((basis) => (
+                    <blockquote key={`${basis.reference}-${basis.excerpt}`}>
+                      <span>{basis.reference}</span>
+                      <p>“{basis.excerpt}”</p>
+                    </blockquote>
+                  ))}
+                </div>
+              ) : null}
               <div className="source-note">
                 <BookOpen size={15} />
-                <span>{card.source}</span>
+                {card.sourceUrl ? (
+                  <a
+                    href={card.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {card.source} <ExternalLink size={13} />
+                  </a>
+                ) : (
+                  <span>{card.source}</span>
+                )}
               </div>
             </div>
           )}
@@ -1044,6 +1103,8 @@ function ContentView({
   const [editor, setEditor] = useState<EditorState>(null);
   const [deleting, setDeleting] = useState<DeleteState>(null);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [generatedReview, setGeneratedReview] =
+    useState<GeminiGenerationResult | null>(null);
 
   const filteredCards = data.cards.filter((card) => {
     const matchesTopic =
@@ -1126,20 +1187,28 @@ function ContentView({
     notify("Item removido.");
   }
 
-  function generateQuestions(options: QuestionGenerationOptions) {
-    const generated = generateEditorialQuestions(data, options);
-    if (!generated.length) {
-      notify("Não há questões inéditas com esses filtros.");
-      return;
+  async function generateWithGemini(options: QuestionGenerationOptions) {
+    const topics = data.topics.filter(
+      (topic) => topic.subjectId === "subject_afo",
+    );
+    const result = await generateGeminiQuestions(data, topics, options);
+    if (!result.cards.length) {
+      throw new Error(
+        "O Gemini respondeu, mas nenhuma questão passou pela validação. Tente novamente.",
+      );
     }
+    setGeneratedReview(result);
+    setGeneratorOpen(false);
+  }
 
+  function approveGeneratedQuestions(cards: StudyCard[]) {
     setData((current) => ({
       ...current,
-      cards: [...current.cards, ...generated],
+      cards: [...current.cards, ...cards],
     }));
-    setGeneratorOpen(false);
+    setGeneratedReview(null);
     notify(
-      `${generated.length} ${generated.length === 1 ? "questão adicionada" : "questões adicionadas"} à sua fila.`,
+      `${cards.length} ${cards.length === 1 ? "questão aprovada" : "questões aprovadas"} e adicionadas ao FSRS.`,
     );
   }
 
@@ -1431,11 +1500,24 @@ function ContentView({
           onClose={() => setGeneratorOpen(false)}
         >
           <QuestionGeneratorForm
-            data={data}
             topics={data.topics.filter(
               (topic) => topic.subjectId === "subject_afo",
             )}
-            onGenerate={generateQuestions}
+            onGenerateGemini={generateWithGemini}
+          />
+        </Modal>
+      )}
+      {generatedReview && (
+        <Modal
+          title="Revisar questões geradas"
+          onClose={() => setGeneratedReview(null)}
+          wide
+        >
+          <GeneratedQuestionsReview
+            result={generatedReview}
+            data={data}
+            onCancel={() => setGeneratedReview(null)}
+            onApprove={approveGeneratedQuestions}
           />
         </Modal>
       )}
@@ -1610,15 +1692,14 @@ function CardForm({
   topics: Topic[];
   onSave: (card: StudyCard) => void;
 }) {
-  const [kind, setKind] = useState<CardKind>(card?.kind ?? "multiple_choice");
+  const [formError, setFormError] = useState("");
   const [subjectId, setSubjectId] = useState(
     card?.subjectId ?? subjects[0]?.id ?? "",
   );
   const filteredTopics = topics.filter((topic) => topic.subjectId === subjectId);
   const initialAlternatives =
-    card?.kind === "multiple_choice"
-      ? card.alternatives.map((item) => item.text).join("\n")
-      : "";
+    card?.alternatives.map((item) => item.text).join("\n") ?? "";
+  const optionLetters = ["A", "B", "C", "D", "E"];
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1627,33 +1708,57 @@ function CardForm({
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const alternatives =
-      kind === "true_false"
-        ? [
-            { id: "A", text: "Certo" },
-            { id: "B", text: "Errado" },
-          ]
-        : lines.map((text, index) => ({
-            id: String.fromCharCode(65 + index),
-            text,
-          }));
-    const correctAnswer =
-      kind === "true_false"
-        ? String(form.get("trueFalseAnswer"))
-        : String(form.get("correctAnswer")).toUpperCase();
+    if (lines.length !== 5) {
+      setFormError("Informe exatamente cinco alternativas, uma por linha.");
+      return;
+    }
+    setFormError("");
+    const alternatives = lines.map((text, index) => ({
+      id: optionLetters[index],
+      text,
+    }));
+    const correctAnswer = String(form.get("correctAnswer")).toUpperCase();
+    const alternativeExplanations = Object.fromEntries(
+      optionLetters.map((letter) => [
+        letter,
+        String(form.get(`analysis_${letter}`)).trim(),
+      ]),
+    );
+    const distractorNotes = Object.fromEntries(
+      Object.entries(alternativeExplanations).filter(
+        ([letter]) => letter !== correctAnswer,
+      ),
+    );
     const timestamp = new Date().toISOString();
 
     onSave({
       id: card?.id ?? makeId("card"),
       subjectId,
       topicId: String(form.get("topicId")),
-      kind,
+      kind: "multiple_choice",
       question: String(form.get("question")),
       alternatives,
       correctAnswer,
       explanation: String(form.get("explanation")),
-      distractorNotes: card?.distractorNotes ?? {},
+      distractorNotes,
+      alternativeExplanations,
+      legalBasis: [
+        {
+          reference: String(form.get("legalReference")).trim(),
+          excerpt: String(form.get("legalExcerpt")).trim(),
+        },
+      ],
+      memoryAid: {
+        type: String(form.get("memoryAidType")) as
+          | "Esquema"
+          | "Mnemônico"
+          | "Mapa mental"
+          | "Quadro comparativo",
+        title: String(form.get("memoryAidTitle")).trim(),
+        content: String(form.get("memoryAidContent")).trim(),
+      },
       source: String(form.get("source")),
+      sourceUrl: String(form.get("sourceUrl")).trim() || undefined,
       tags: String(form.get("tags"))
         .split(",")
         .map((tag) => tag.trim())
@@ -1669,18 +1774,14 @@ function CardForm({
 
   return (
     <form className="editor-form" onSubmit={submit}>
-      <div className="form-grid three">
-        <label>
-          <span>Tipo de questão</span>
-          <select
-            name="kind"
-            value={kind}
-            onChange={(event) => setKind(event.target.value as CardKind)}
-          >
-            <option value="multiple_choice">Múltipla escolha</option>
-            <option value="true_false">Certo ou errado</option>
-          </select>
-        </label>
+      <div className="editor-tip">
+        <ShieldCheck size={18} />
+        <span>
+          <strong>Padrão DuoCards:</strong> toda questão usa múltipla escolha
+          com cinco alternativas, de A a E.
+        </span>
+      </div>
+      <div className="form-grid two">
         <label>
           <span>Matéria</span>
           <select
@@ -1715,45 +1816,34 @@ function CardForm({
           placeholder="Escreva um comando claro, autossuficiente e sem ambiguidade."
         />
       </label>
-      {kind === "multiple_choice" ? (
-        <div className="form-grid answer-grid">
-          <label>
-            <span>Alternativas — uma por linha</span>
-            <textarea
-              name="alternatives"
-              defaultValue={initialAlternatives}
-              rows={6}
-              required
-              placeholder={"Primeira alternativa\nSegunda alternativa\nTerceira alternativa\nQuarta alternativa"}
-            />
-          </label>
-          <label>
-            <span>Gabarito</span>
-            <select
-              name="correctAnswer"
-              defaultValue={card?.correctAnswer ?? "A"}
-            >
-              {["A", "B", "C", "D", "E"].map((letter) => (
-                <option key={letter} value={letter}>
-                  Alternativa {letter}
-                </option>
-              ))}
-            </select>
-            <small>Use a letra correspondente à ordem das linhas.</small>
-          </label>
-        </div>
-      ) : (
+      <div className="form-grid answer-grid">
+        <label>
+          <span>Alternativas A–E — uma por linha</span>
+          <textarea
+            name="alternatives"
+            defaultValue={initialAlternatives}
+            rows={7}
+            required
+            placeholder={
+              "Alternativa A\nAlternativa B\nAlternativa C\nAlternativa D\nAlternativa E"
+            }
+          />
+        </label>
         <label>
           <span>Gabarito</span>
           <select
-            name="trueFalseAnswer"
+            name="correctAnswer"
             defaultValue={card?.correctAnswer ?? "A"}
           >
-            <option value="A">Certo</option>
-            <option value="B">Errado</option>
+            {optionLetters.map((letter) => (
+              <option key={letter} value={letter}>
+                Alternativa {letter}
+              </option>
+            ))}
           </select>
+          <small>Use a letra correspondente à ordem das linhas.</small>
         </label>
-      )}
+      </div>
       <label>
         <span>Explicação comentada</span>
         <textarea
@@ -1764,6 +1854,82 @@ function CardForm({
           placeholder="Explique a regra, aplique-a ao enunciado e destaque a armadilha relevante."
         />
       </label>
+      <fieldset className="alternative-analysis-editor">
+        <legend>Análise individual das alternativas</legend>
+        <p>
+          Explique por que a correta está certa e por que cada distrator está
+          errado.
+        </p>
+        <div>
+          {optionLetters.map((letter) => (
+            <label key={letter}>
+              <span>Alternativa {letter}</span>
+              <textarea
+                name={`analysis_${letter}`}
+                defaultValue={card?.alternativeExplanations?.[letter]}
+                rows={3}
+                required
+              />
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <div className="form-grid two">
+        <label>
+          <span>Base legal</span>
+          <input
+            name="legalReference"
+            defaultValue={card?.legalBasis?.[0]?.reference ?? card?.source}
+            required
+            placeholder="Ex.: Lei nº 4.320/1964, art. 6º."
+          />
+        </label>
+        <label>
+          <span>Letra da lei</span>
+          <textarea
+            name="legalExcerpt"
+            defaultValue={card?.legalBasis?.[0]?.excerpt}
+            rows={3}
+            required
+            placeholder="Trecho literal e curto do dispositivo."
+          />
+        </label>
+      </div>
+      <fieldset className="memory-aid-editor">
+        <legend>Recurso de memorização</legend>
+        <div className="form-grid three">
+          <label>
+            <span>Tipo</span>
+            <select
+              name="memoryAidType"
+              defaultValue={card?.memoryAid?.type ?? "Esquema"}
+            >
+              <option>Esquema</option>
+              <option>Mnemônico</option>
+              <option>Mapa mental</option>
+              <option>Quadro comparativo</option>
+            </select>
+          </label>
+          <label>
+            <span>Título</span>
+            <input
+              name="memoryAidTitle"
+              defaultValue={card?.memoryAid?.title}
+              required
+            />
+          </label>
+          <label>
+            <span>Conteúdo</span>
+            <textarea
+              name="memoryAidContent"
+              defaultValue={card?.memoryAid?.content}
+              rows={3}
+              required
+              placeholder="Esquema ou mnemônico fiel à regra."
+            />
+          </label>
+        </div>
+      </fieldset>
       <label>
         <span>Fonte</span>
         <input
@@ -1771,6 +1937,15 @@ function CardForm({
           defaultValue={card?.source}
           required
           placeholder="Ex.: Constituição Federal, art. 165, § 8º."
+        />
+      </label>
+      <label>
+        <span>Link oficial da fonte (opcional)</span>
+        <input
+          name="sourceUrl"
+          type="url"
+          defaultValue={card?.sourceUrl}
+          placeholder="https://www.planalto.gov.br/..."
         />
       </label>
       <div className="form-grid two">
@@ -1794,6 +1969,7 @@ function CardForm({
           enunciado exige duas regras independentes, transforme-o em dois.
         </span>
       </div>
+      {formError && <div className="generator-error">{formError}</div>}
       <div className="form-actions">
         <button className="primary-button" type="submit">
           Salvar card
@@ -1804,22 +1980,20 @@ function CardForm({
 }
 
 function QuestionGeneratorForm({
-  data,
   topics,
-  onGenerate,
+  onGenerateGemini,
 }: {
-  data: AppData;
   topics: Topic[];
-  onGenerate: (options: QuestionGenerationOptions) => void;
+  onGenerateGemini: (options: QuestionGenerationOptions) => Promise<void>;
 }) {
   const [options, setOptions] = useState<QuestionGenerationOptions>({
     topicId: "all",
-    kind: "mixed",
+    kind: "multiple_choice",
     difficulty: "all",
-    count: 5,
+    count: 3,
   });
-  const available = countAvailableEditorialQuestions(data, options);
-  const effectiveCount = Math.min(options.count, available);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState("");
 
   function updateOptions(
     partial: Partial<QuestionGenerationOptions>,
@@ -1827,10 +2001,22 @@ function QuestionGeneratorForm({
     setOptions((current) => ({ ...current, ...partial }));
   }
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!effectiveCount) return;
-    onGenerate({ ...options, count: effectiveCount });
+    if (!options.count || !geminiConfiguration.ready || generating) return;
+    setError("");
+    setGenerating(true);
+    try {
+      await onGenerateGemini(options);
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Não foi possível gerar as questões. Tente novamente.",
+      );
+    } finally {
+      setGenerating(false);
+    }
   }
 
   return (
@@ -1840,15 +2026,29 @@ function QuestionGeneratorForm({
           <Sparkles size={24} />
         </div>
         <div>
-          <strong>Banco editorial verificado</strong>
+          <strong>Gemini com padrão editorial de concursos</strong>
           <p>
-            Questões comentadas com fonte normativa, prontas para entrar no
-            FSRS. Funciona sem IA, chave de API ou cobrança.
+            Questões A–E, análise das cinco alternativas, letra da lei e
+            recurso de memorização. Você aprova antes de entrar no FSRS.
           </p>
         </div>
       </div>
 
-      <div className="form-grid two">
+      {!geminiConfiguration.ready && (
+        <div className="generator-setup">
+          <CircleHelp size={18} />
+          <div>
+            <strong>Ativação administrativa pendente</strong>
+            <span>
+              {!geminiConfiguration.firebase
+                ? "É preciso conectar este deploy a um projeto Firebase."
+                : "O Firebase já está conectado; falta configurar o App Check."}
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="form-grid three">
         <label>
           <span>Assunto</span>
           <select
@@ -1865,24 +2065,6 @@ function QuestionGeneratorForm({
             ))}
           </select>
         </label>
-        <label>
-          <span>Formato</span>
-          <select
-            value={options.kind}
-            onChange={(event) =>
-              updateOptions({
-                kind: event.target.value as QuestionGenerationOptions["kind"],
-              })
-            }
-          >
-            <option value="mixed">Misturar formatos</option>
-            <option value="multiple_choice">Múltipla escolha</option>
-            <option value="true_false">Certo ou errado</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="form-grid two">
         <label>
           <span>Dificuldade</span>
           <select
@@ -1904,16 +2086,12 @@ function QuestionGeneratorForm({
         <label>
           <span>Quantidade</span>
           <select
-            value={Math.min(options.count, Math.max(1, available))}
+            value={options.count}
             onChange={(event) =>
               updateOptions({ count: Number(event.target.value) })
             }
-            disabled={!available}
           >
-            {Array.from(
-              { length: Math.min(10, Math.max(1, available)) },
-              (_, index) => index + 1,
-            ).map((count) => (
+            {Array.from({ length: 5 }, (_, index) => index + 1).map((count) => (
               <option key={count} value={count}>
                 {count} {count === 1 ? "questão" : "questões"}
               </option>
@@ -1922,42 +2100,203 @@ function QuestionGeneratorForm({
         </label>
       </div>
 
-      <div className={`generator-availability ${available ? "" : "empty"}`}>
+      <div className="generator-availability">
         <div>
-          <strong>{available}</strong>
-          <span>
-            {available === 1
-              ? "questão inédita disponível"
-              : "questões inéditas disponíveis"}
-          </span>
+          <strong>A–E</strong>
+          <span>padrão obrigatório</span>
         </div>
         <small>
-          O gerador nunca adiciona uma questão que já esteja na sua biblioteca.
+          Até 5 por lote para preservar a profundidade. Não existe limite total
+          do banco.
         </small>
       </div>
 
       <div className="editor-tip">
         <ShieldCheck size={18} />
         <span>
-          <strong>Qualidade primeiro:</strong> cada questão contém gabarito,
-          explicação e referência à Constituição, à Lei nº 4.320/1964, à LRF ou
-          ao MCASP.
+          <strong>Qualidade primeiro:</strong> o validador exige cinco
+          alternativas e cinco análises, fonte oficial, letra da lei e recurso
+          de memorização.
         </span>
       </div>
+
+      {error && <div className="generator-error">{error}</div>}
 
       <div className="form-actions">
         <button
           className="primary-button"
           type="submit"
-          disabled={!available}
+          disabled={!geminiConfiguration.ready || generating}
         >
-          <Sparkles size={17} />
-          {available
-            ? `Gerar ${effectiveCount} ${effectiveCount === 1 ? "questão" : "questões"}`
-            : "Banco esgotado para estes filtros"}
+          {generating ? (
+            <LoaderCircle className="spin" size={17} />
+          ) : (
+            <Sparkles size={17} />
+          )}
+          {generating
+            ? "Consultando fontes e redigindo..."
+            : geminiConfiguration.ready
+              ? `Gerar ${options.count} ${options.count === 1 ? "questão" : "questões"}`
+              : "Gemini ainda não ativado"}
         </button>
       </div>
     </form>
+  );
+}
+
+function GeneratedQuestionsReview({
+  result,
+  data,
+  onCancel,
+  onApprove,
+}: {
+  result: GeminiGenerationResult;
+  data: AppData;
+  onCancel: () => void;
+  onApprove: (cards: StudyCard[]) => void;
+}) {
+  const [selected, setSelected] = useState(
+    () => new Set(result.cards.map((card) => card.id)),
+  );
+  const approved = result.cards.filter((card) => selected.has(card.id));
+
+  function toggle(id: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <div className="generated-review">
+      <div className="review-summary">
+        <div className="review-summary-mark">
+          <ShieldCheck size={22} />
+        </div>
+        <div>
+          <strong>Validação automática concluída</strong>
+          <p>
+            {result.cards.length}{" "}
+            {result.cards.length === 1
+              ? "questão passou"
+              : "questões passaram"}{" "}
+            pelos filtros locais
+            {result.rejected
+              ? `; ${result.rejected} ${result.rejected === 1 ? "foi rejeitada" : "foram rejeitadas"}.`
+              : "."}
+          </p>
+        </div>
+        <span>{result.model}</span>
+      </div>
+
+      <div className="review-warning">
+        <CircleHelp size={17} />
+        <span>
+          Confira especialmente o artigo citado e o gabarito. IA ajuda a
+          redigir, mas a aprovação editorial continua sendo humana.
+        </span>
+      </div>
+
+      <div className="generated-question-list">
+        {result.cards.map((card, index) => (
+          <article
+            className={`generated-question ${selected.has(card.id) ? "selected" : ""}`}
+            key={card.id}
+          >
+            <label className="review-selector">
+              <input
+                type="checkbox"
+                checked={selected.has(card.id)}
+                onChange={() => toggle(card.id)}
+              />
+              <span>
+                <Check size={14} />
+              </span>
+            </label>
+            <div className="generated-question-body">
+              <div className="generated-question-meta">
+                <span>Questão {index + 1}</span>
+                <span>{getTopicName(data, card.topicId)}</span>
+                <span>{card.difficulty}</span>
+              </div>
+              <h3>{card.question}</h3>
+              <div className="review-alternatives">
+                {card.alternatives.map((alternative) => (
+                  <div
+                    className={
+                      alternative.id === card.correctAnswer ? "correct" : ""
+                    }
+                    key={alternative.id}
+                  >
+                    <strong>{alternative.id}</strong>
+                    <div className="review-alternative-content">
+                      <span>{alternative.text}</span>
+                      <p>
+                        {card.alternativeExplanations?.[alternative.id]}
+                      </p>
+                    </div>
+                    {alternative.id === card.correctAnswer && (
+                      <CheckCircle2 size={16} />
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="review-explanation">
+                <strong>Comentário</strong>
+                <p>{card.explanation}</p>
+              </div>
+              {card.memoryAid && (
+                <div className="review-memory-aid">
+                  <Brain size={17} />
+                  <div>
+                    <span>{card.memoryAid.type}</span>
+                    <strong>{card.memoryAid.title}</strong>
+                    <p>{card.memoryAid.content}</p>
+                  </div>
+                </div>
+              )}
+              {card.legalBasis?.map((basis) => (
+                <blockquote
+                  className="review-legal-basis"
+                  key={`${basis.reference}-${basis.excerpt}`}
+                >
+                  <strong>{basis.reference}</strong>
+                  <p>“{basis.excerpt}”</p>
+                </blockquote>
+              ))}
+              <a
+                className="review-source"
+                href={card.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <BookOpen size={15} />
+                {card.source}
+                <ExternalLink size={13} />
+              </a>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="review-actions">
+        <button className="secondary-button" type="button" onClick={onCancel}>
+          Descartar lote
+        </button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!approved.length}
+          onClick={() => onApprove(approved)}
+        >
+          <Check size={17} />
+          Adicionar {approved.length}{" "}
+          {approved.length === 1 ? "aprovada" : "aprovadas"}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -2279,14 +2618,14 @@ function SettingsView({
                 <strong>
                   {cloudStatus.connected
                     ? cloudStatus.userEmail
-                    : firebaseConfigured
+                    : firebaseCloudSyncConfigured
                       ? "Nuvem disponível"
                       : "Dados neste navegador"}
                 </strong>
                 <span>{cloudStatus.message}</span>
               </div>
             </div>
-            {firebaseConfigured ? (
+            {firebaseCloudSyncConfigured ? (
               cloudStatus.connected ? (
                 <button
                   className="secondary-button"
@@ -2308,16 +2647,17 @@ function SettingsView({
             )}
           </div>
 
-          {!firebaseConfigured && (
+          {!firebaseCloudSyncConfigured && (
             <div className="setup-note">
               <CircleHelp size={18} />
               <p>
                 Seus cards e seu progresso estão salvos apenas neste navegador.
                 Se os dados do site forem apagados ou você trocar de
                 dispositivo, use um backup para recuperá-los. Para sincronizar
-                automaticamente, configure as variáveis{" "}
-                <code>VITE_FIREBASE_*</code> descritas no README e habilite o
-                login Google.
+                automaticamente, ative o Firestore e o login Google conforme
+                descrito no README. O Firebase AI Logic já pode continuar
+                ativo para gerar questões sem mover o seu progresso para a
+                nuvem.
               </p>
             </div>
           )}

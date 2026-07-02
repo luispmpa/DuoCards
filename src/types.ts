@@ -2,6 +2,11 @@ export type View = "home" | "study" | "content" | "progress" | "settings";
 
 export type CardKind = "multiple_choice" | "true_false";
 export type Difficulty = "Básico" | "Intermediário" | "Avançado";
+export type MemoryAidType =
+  | "Esquema"
+  | "Mnemônico"
+  | "Mapa mental"
+  | "Quadro comparativo";
 
 export interface Subject {
   id: string;
@@ -24,6 +29,17 @@ export interface Topic {
 export interface Alternative {
   id: string;
   text: string;
+}
+
+export interface LegalBasis {
+  reference: string;
+  excerpt: string;
+}
+
+export interface MemoryAid {
+  type: MemoryAidType;
+  title: string;
+  content: string;
 }
 
 export interface SerializedFsrsCard {
@@ -59,7 +75,11 @@ export interface StudyCard {
   correctAnswer: string;
   explanation: string;
   distractorNotes: Record<string, string>;
+  alternativeExplanations?: Record<string, string>;
+  legalBasis?: LegalBasis[];
+  memoryAid?: MemoryAid;
   source: string;
+  sourceUrl?: string;
   tags: string[];
   difficulty: Difficulty;
   active: boolean;
